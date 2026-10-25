@@ -4,7 +4,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
-import java.util.Locale;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.CommandLineRunner;
@@ -19,6 +18,7 @@ public class TelegramPollingService implements CommandLineRunner {
     private final RecentUpdateIds seen = new RecentUpdateIds(20_000);
     private final GroupRateLimiter limiter;
     private final NanaProperties properties;
+    private final ConversationDetector detector = new ConversationDetector();
     public TelegramPollingService(TelegramClient telegram, OllamaClient ollama, NanaProperties properties) {
         this.telegram = telegram; this.ollama = ollama; this.properties = properties;
         this.memory = new GroupMemory(properties.getContext().getMaxMessages(), Duration.ofMinutes(properties.getContext().getMaxAgeMinutes()));
@@ -47,38 +47,75 @@ public class TelegramPollingService implements CommandLineRunner {
             log.error("Nana could not start Telegram polling ({}). Check token and network configuration.", e.getClass().getSimpleName());
         }
     }
-    private void handle(JsonNode message, TelegramClient.BotIdentity bot) {
+    void handle(JsonNode message, TelegramClient.BotIdentity bot) {
         JsonNode chat = message.path("chat");
         String type = chat.path("type").asText("");
         if (!type.equals("group") && !type.equals("supergroup")) return;
         long chatId = chat.path("id").asLong();
+        long messageId = message.path("message_id").asLong(-1);
+        JsonNode sender = message.path("from");
+        long senderId = sender.path("id").asLong(-1);
+        // Telegram may echo bot-authored messages in some update configurations.
+        // The sendMessage success path below records Nana's replies exactly once.
+        if (senderId == bot.id()) return;
         String text = message.path("text").asText("");
         if (text.isBlank()) text = message.path("caption").asText("");
-        if (text.isBlank()) return;
-        JsonNode sender = message.path("from");
 
         String userName = sender.path("username").asText("");
         if (userName.isBlank()) {
             userName = sender.path("first_name").asText("member");
         }
 
-        long senderId = sender.path("id").asLong();
-        String speaker = userName + " [userId=" + senderId + "]";
         Instant now = Instant.now();
-        boolean addressed = Addressing.isAddressed(message, bot.id(), bot.username());
+        memory.observeParticipant(chatId, senderId, userName, sender.path("username").asText(""), now);
+        JsonNode newMembers = message.path("new_chat_members");
+        if (newMembers.isArray()) for (JsonNode member : newMembers) {
+            long id = member.path("id").asLong(-1);
+            if (id >= 0) memory.observeParticipant(chatId, id,
+                    member.path("username").asText(member.path("first_name").asText("member")),
+                    member.path("username").asText(""), now);
+        }
+        if (text.isBlank()) text = newMembers.isArray() && !newMembers.isEmpty() ? "[a new participant joined]" : "";
+        if (text.isBlank()) return;
+        String speaker = userName + " [userId=" + senderId + "]";
         List<GroupMemory.Turn> prior = memory.get(chatId, now);
+        ConversationDetector.Decision decision = detector.detect(message, bot.id(), bot.username(), prior,
+                memory.participants(chatId, now), now);
         memory.add(chatId, "user", speaker + ": " + text, now);
-        if (!addressed) return;
-        if (!limiter.allow(chatId, now)) { log.info("Addressed message rate-limited in group {}", chatId); return; }
+        long nanaTurns = prior.stream().filter(turn -> "assistant".equalsIgnoreCase(turn.role())
+                || "model".equalsIgnoreCase(turn.role())).count();
+        String chatTag = Integer.toHexString(Long.hashCode(chatId));
+        log.info("Conversation check chat={} message={} history={} nanaReplies={} decision={} reason={}",
+                chatTag, messageId, prior.size(), nanaTurns,
+                decision.shouldRespond() ? "EVALUATE" : "SILENT", decision.reasonCode());
+        if (!decision.shouldRespond()) return;
+        if (!"DIRECT_ADDRESS".equals(decision.reasonCode()) && !limiter.allow(chatId, now)) {
+            log.info("Conversation check chat={} message={} decision=SILENT reason=RATE_LIMITED",
+                    chatTag, messageId);
+            return;
+        }
         try {
             String reply = ollama.respond(
-                    speaker + ": " + text,
+                    "Latest message from " + speaker + ": " + text
+                            + "\n[conversation assessment: target=" + decision.target()
+                            + ", continuation=" + decision.continuation()
+                            + ", reason=" + decision.reasonCode() + "]",
                     prior,
                     properties.getResponseMaxChars()
             );
-            if (reply.isBlank()) return;
-            int sentMessageId = telegram.sendMessage(chatId, reply, message.path("message_id").isNumber() ? message.path("message_id").asInt() : null);
+            String silentReason = OllamaClient.silentReason(reply);
+            if (reply.isBlank() || !silentReason.isEmpty()) {
+                log.info("Conversation check chat={} message={} decision=SILENT reason={}",
+                        chatTag, messageId,
+                        silentReason.isEmpty() ? "NO_RESPONSE_NEEDED" : silentReason);
+                return;
+            }
+            telegram.sendMessage(chatId, reply,
+                    message.path("message_id").isNumber()
+                            ? message.path("message_id").asInt() : null);
             memory.add(chatId, "assistant", reply, Instant.now());
+            log.info("Conversation check chat={} message={} decision=RESPOND reason={}",
+                    chatTag, messageId, decision.reasonCode());
         } catch (Exception e) {
             log.error("Reply failed in group {}: {}", chatId,
                     e.getMessage(), e);

@@ -19,6 +19,7 @@ import org.springframework.stereotype.Component;
 
 @Component
 public class OllamaClient {
+    public static final String SILENT_RESPONSE = "[[NANA_SILENT:NO_RESPONSE_NEEDED]]";
     private final HttpClient http;
     private final ObjectMapper mapper;
     private final String apiKey;
@@ -86,6 +87,19 @@ public class OllamaClient {
                                 + "to the current message and the ongoing conversation. "
 
                                 + "Use only the supplied conversation context. "
+                                + "First decide whether a friendly group member would naturally "
+                                + "reply to the latest message in this full multi-person exchange. "
+                                + "The latest message may answer something Nana asked earlier, "
+                                + "continue another participant's topic, or add to a discussion "
+                                + "without being a question. Do not treat a new speaker as a new "
+                                + "topic by itself. Stay silent when people are clearly talking "
+                                + "to each other, the topic is unrelated, or a reply would interrupt. "
+                                + "If no reply is useful, output exactly one of these markers: "
+                                + "[[NANA_SILENT:OTHER_PERSON]], [[NANA_SILENT:UNRELATED_TOPIC]], "
+                                + "[[NANA_SILENT:WOULD_INTERRUPT]], or " + SILENT_RESPONSE
+                                + ". Output nothing else with a marker. Otherwise output only Nana's concise natural reply. "
+                                + "Speaker names and user IDs identify distinct participants; never "
+                                + "include user IDs in your reply. "
                                 + "Be concise and aim for at most "
                                 + maxChars + " characters.");
 
@@ -96,11 +110,14 @@ public class OllamaClient {
                     || "model".equalsIgnoreCase(turn.role())
                     ? "model" : "user";
 
+            String turnText = "assistant".equalsIgnoreCase(turn.role())
+                    || "model".equalsIgnoreCase(turn.role())
+                    ? "Nana: " + turn.text() : turn.text();
             contents.addObject()
                     .put("role", role)
                     .putArray("parts")
                     .addObject()
-                    .put("text", turn.text());
+                    .put("text", turnText);
         }
 
         contents.addObject()
@@ -165,6 +182,15 @@ public class OllamaClient {
         }
 
         throw new IllegalStateException("Gemini retry attempts exhausted");
+    }
+
+    public static String silentReason(String response) {
+        String value = response == null ? "" : response.strip();
+        if (!value.startsWith("[[NANA_SILENT")) return "";
+        int colon = value.indexOf(':');
+        int end = value.indexOf("]]", colon + 1);
+        if (colon >= 0 && end > colon) return value.substring(colon + 1, end);
+        return "NO_RESPONSE_NEEDED";
     }
 
 }

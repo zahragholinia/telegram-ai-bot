@@ -18,4 +18,12 @@ class GroupMemoryTest {
         assertEquals("private to group two", memory.get(2, now).getFirst().text());
         assertTrue(memory.get(1, now.plus(Duration.ofHours(1))).isEmpty());
     }
+
+    @Test void expiresStaleParticipantIdentitiesWithConversationMemory() {
+        GroupMemory memory = new GroupMemory(8, Duration.ofMinutes(30));
+        Instant now = Instant.now();
+        memory.observeParticipant(1, 12, "Ali", "ali", now);
+        assertEquals(1, memory.participants(1, now).size());
+        assertTrue(memory.participants(1, now.plus(Duration.ofMinutes(31))).isEmpty());
+    }
 }
