@@ -10,22 +10,21 @@ import static org.junit.jupiter.api.Assertions.*;
 class ConversationDetectorTest {
     private final ObjectMapper mapper = new ObjectMapper();
     private final ConversationDetector detector = new ConversationDetector();
-    private final Instant now = Instant.parse("2026-10-25T10:00:00Z");
     private JsonNode message(String json) throws Exception { return mapper.readTree(json); }
 
-    @Test void distinguishesNanaAnotherParticipantAndGroup() throws Exception {
-        var participants = List.of(new GroupMemory.Participant(2, "Mina", "mina", now, now));
-        assertEquals(ConversationDetector.Target.NANA, detector.detect(message("{\"from\":{\"id\":1},\"text\":\"Nana help?\"}"), 9, "nana_bot", List.of(), participants, now).target());
-        assertEquals(ConversationDetector.Target.PERSON, detector.detect(message("{\"from\":{\"id\":1},\"text\":\"@mina what do you think?\"}"), 9, "nana_bot", List.of(), participants, now).target());
-        var group = detector.detect(message("{\"from\":{\"id\":1},\"text\":\"Anyone know the answer?\"}"), 9, "nana_bot", List.of(new GroupMemory.Turn("user", "topic", now.minusSeconds(20))), participants, now);
-        assertEquals(ConversationDetector.Target.NONE, group.target());
-        assertTrue(group.shouldRespond());
+    @Test void conversationHistoryNeverMakesAnUnaddressedMessageEligible() throws Exception {
+        var now = Instant.now();
+        var active = List.of(new GroupMemory.Turn("assistant", "Nana said something", now));
+        var decision = detector.detect(message("{\"from\":{\"id\":1},\"text\":\"What do you think?\"}"),
+                9, "ZaraNanaBot", active, List.of(), now);
+        assertFalse(decision.shouldRespond());
+        assertEquals("NOT_ADDRESSED", decision.reasonCode());
     }
 
-    @Test void avoidsInterruptingUnrelatedMessageAndRecognizesJoin() throws Exception {
-        var unrelated = detector.detect(message("{\"from\":{\"id\":1},\"text\":\"Thanks!\"}"), 9, "nana_bot", List.of(), List.of(), now);
-        assertFalse(unrelated.shouldRespond());
-        var join = detector.detect(message("{\"from\":{\"id\":1},\"new_chat_members\":[{\"id\":3,\"first_name\":\"Ali\"}]}"), 9, "nana_bot", List.of(), List.of(), now);
-        assertTrue(join.newParticipant());
+    @Test void explicitAddressPassesEvenWhenMessageTargetsOtherParticipantsToo() throws Exception {
+        var decision = detector.detect(message("{\"from\":{\"id\":1},\"text\":\"Nana, what does Ali think?\"}"),
+                9, "ZaraNanaBot", List.of(), List.of(), Instant.now());
+        assertTrue(decision.shouldRespond());
+        assertEquals("DIRECT_ADDRESS", decision.reasonCode());
     }
 }

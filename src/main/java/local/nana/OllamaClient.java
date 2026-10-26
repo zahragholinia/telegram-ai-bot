@@ -47,6 +47,7 @@ public class OllamaClient {
     }
 
 
+
     public String respond(
             String currentMessage,
             List<GroupMemory.Turn> context,
@@ -86,22 +87,56 @@ public class OllamaClient {
                                 + "Keep your response style, directness, and length suited "
                                 + "to the current message and the ongoing conversation. "
 
-                                + "Use only the supplied conversation context. "
-                                + "First decide whether a friendly group member would naturally "
-                                + "reply to the latest message in this full multi-person exchange. "
-                                + "The latest message may answer something Nana asked earlier, "
-                                + "continue another participant's topic, or add to a discussion "
-                                + "without being a question. Do not treat a new speaker as a new "
-                                + "topic by itself. Stay silent when people are clearly talking "
-                                + "to each other, the topic is unrelated, or a reply would interrupt. "
-                                + "If no reply is useful, output exactly one of these markers: "
+                                + "Use only the supplied conversation context. The application "
+                                + "sends a message for generation only after verifying that the "
+                                + "user explicitly addressed Nana by name, mentioned her bot "
+                                + "username, or replied directly to a Nana message. This explicit "
+                                + "address is a clear request for a response. Always answer it. "
+                                + "Never use any NANA_SILENT marker for an explicitly addressed "
+                                + "message because other people are in the discussion, the topic "
+                                + "involves them, or a reply might interrupt. Addressing Nana takes "
+                                + "priority over those considerations. This request already "
+                                + "passed the explicit-address check, so answer it directly. "
+                                + "The silent markers below are reserved for unaddressed requests; "
+                                + "never emit one for this request. If applicable, output exactly "
+                                + "one of these markers: "
                                 + "[[NANA_SILENT:OTHER_PERSON]], [[NANA_SILENT:UNRELATED_TOPIC]], "
-                                + "[[NANA_SILENT:WOULD_INTERRUPT]], or " + SILENT_RESPONSE
+                                + "[[NANA_SILENT:WOULD_INTERRUPT]], or "
+                                + SILENT_RESPONSE
                                 + ". Output nothing else with a marker. Otherwise output only Nana's concise natural reply. "
                                 + "Speaker names and user IDs identify distinct participants; never "
                                 + "include user IDs in your reply. "
                                 + "Be concise and aim for at most "
-                                + maxChars + " characters.");
+                                + maxChars + " characters."
+
+                                + "For general knowledge, educational, scientific, historical, "
+                                + "technical, or explanatory questions, provide a useful "
+                                + "and complete answer instead of a one-line summary. "
+
+                                + "Explain the main points clearly and include relevant "
+                                + "details, examples, and explanations when they help "
+                                + "the user understand the topic. "
+
+                                + "If the user asks multiple questions, answer each "
+                                + "question separately and do not skip any part. "
+
+                                + "For educational questions, prefer a clear structure "
+                                + "with short paragraphs or bullet points when useful. "
+
+                                + "Do not make answers unnecessarily short. The goal "
+                                + "is to be informative, clear, and complete, not merely "
+                                + "to provide the shortest possible response. "
+
+                                + "For simple questions, a short answer is enough. "
+                                + "For complex questions, provide a more detailed "
+                                + "explanation appropriate to the question. "
+
+                                + "If the user asks for a detailed explanation, "
+                                + "step-by-step guidance, or examples, provide them "
+                                + "instead of giving a brief summary. "
+
+                                + "If you are unsure about a factual answer, say so "
+                                + "instead of inventing information. ");
 
         ArrayNode contents = body.putArray("contents");
 
@@ -113,6 +148,7 @@ public class OllamaClient {
             String turnText = "assistant".equalsIgnoreCase(turn.role())
                     || "model".equalsIgnoreCase(turn.role())
                     ? "Nana: " + turn.text() : turn.text();
+
             contents.addObject()
                     .put("role", role)
                     .putArray("parts")
@@ -126,6 +162,18 @@ public class OllamaClient {
                 .addObject()
                 .put("text", currentMessage);
 
+        String result = generateContent(body);
+
+        if (result.length() > maxChars) {
+            result = result.substring(0, maxChars).stripTrailing();
+        }
+
+        return result;
+    }
+
+
+
+    public String generateContent(ObjectNode body) throws Exception {
         String requestBody = mapper.writeValueAsString(body);
 
         for (int attempt = 1; attempt <= 3; attempt++) {
@@ -159,10 +207,6 @@ public class OllamaClient {
                             "Gemini returned an empty response");
                 }
 
-                if (result.length() > maxChars) {
-                    result = result.substring(0, maxChars).stripTrailing();
-                }
-
                 return result;
             }
 
@@ -170,19 +214,23 @@ public class OllamaClient {
 
             if (!retryable || attempt == 3) {
                 throw new IllegalStateException(
-                        "Gemini returned HTTP " + status + ": "
-                                + response.body());
+                        "Gemini returned HTTP " + status
+                                + ": " + response.body());
             }
 
             long delayMillis =
                     (long) (1000 * Math.pow(2, attempt - 1))
-                            + ThreadLocalRandom.current().nextLong(250, 1000);
+                            + ThreadLocalRandom.current()
+                            .nextLong(250, 1000);
 
             Thread.sleep(delayMillis);
         }
 
-        throw new IllegalStateException("Gemini retry attempts exhausted");
+        throw new IllegalStateException(
+                "Gemini retry attempts exhausted");
     }
+
+
 
     public static String silentReason(String response) {
         String value = response == null ? "" : response.strip();
